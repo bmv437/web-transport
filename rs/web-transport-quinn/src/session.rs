@@ -1,7 +1,7 @@
 use crate::error::CloseReason;
 use std::{
     fmt,
-    future::Future,
+    future::{poll_fn, Future},
     io::Cursor,
     ops::Deref,
     pin::Pin,
@@ -436,9 +436,10 @@ impl Session {
                 let capsule =
                     web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
                 let timeout = (self.rtt() * 3).max(Duration::from_millis(100));
+                let runtime = self.runtime.clone();
 
                 self.runtime.spawn(Box::pin(async move {
-                    Self::close_with_capsule(conn, send, capsule, code, timeout).await;
+                    Self::close_with_capsule(conn, send, capsule, code, timeout, runtime).await;
                 }));
             }
         } else {
@@ -455,6 +456,7 @@ impl Session {
         capsule: web_transport_proto::Capsule,
         code: u32,
         timeout: std::time::Duration,
+        runtime: Arc<dyn quinn::Runtime>,
     ) {
         let http3_code: quinn::VarInt = web_transport_proto::error_to_http3(code)
             .try_into()
@@ -499,7 +501,13 @@ impl Session {
             conn.closed().await;
         };
 
-        if tokio::time::timeout(timeout, graceful).await.is_err() {
+        let mut timer = runtime.new_timer(std::time::Instant::now() + timeout);
+        let expired = poll_fn(|cx| timer.as_mut().poll(cx));
+
+        futures::pin_mut!(graceful, expired);
+
+        if let futures::future::Either::Right(_) = futures::future::select(graceful, expired).await
+        {
             tracing::debug!("timeout waiting for peer to close; force-closing connection");
             conn.close(http3_code, b"");
         }
