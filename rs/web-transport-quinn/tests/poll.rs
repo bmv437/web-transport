@@ -6,6 +6,9 @@
 //! is actually resumed rather than restarted, which is the part that breaks if a
 //! retained future is rebuilt per poll.
 
+// The builders need quinn's tokio runtime to create their endpoints.
+#![cfg(feature = "tokio")]
+
 use std::{
     future::{poll_fn, Future},
     net::Ipv4Addr,

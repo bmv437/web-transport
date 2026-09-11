@@ -118,6 +118,7 @@ impl Server {
     /// Manually create a new server with a manually constructed Endpoint.
     ///
     /// NOTE: The ALPN must be set to `crate::ALPN` for WebTransport to work.
+    #[cfg(feature = "tokio")]
     pub fn new(endpoint: quinn::Endpoint) -> Self {
         Self::new_with(endpoint, Arc::new(quinn::TokioRuntime))
     }
@@ -183,6 +184,7 @@ pub struct Request {
 
 impl Request {
     /// Accept a new WebTransport session from a client.
+    #[cfg(feature = "tokio")]
     pub async fn accept(conn: quinn::Connection) -> Result<Self, ServerError> {
         Self::accept_with(conn, Arc::new(quinn::TokioRuntime)).await
     }

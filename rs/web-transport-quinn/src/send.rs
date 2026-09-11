@@ -1,6 +1,7 @@
 use crate::error::CloseReason;
+#[cfg(feature = "tokio")]
+use std::io;
 use std::{
-    io,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -153,6 +154,7 @@ impl SendStream {
     }
 }
 
+#[cfg(feature = "tokio")]
 impl tokio::io::AsyncWrite for SendStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
