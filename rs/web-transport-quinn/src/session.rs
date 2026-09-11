@@ -60,6 +60,9 @@ fn negotiated_alpn(_conn: &quinn::Connection) -> Option<String> {
 pub struct Session {
     conn: quinn::Connection,
 
+    // The runtime used to spawn the background tasks that drive the session.
+    runtime: Arc<dyn quinn::Runtime>,
+
     // The session ID, as determined by the stream ID of the connect request.
     session_id: Option<VarInt>,
 
@@ -125,7 +128,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(conn: quinn::Connection, settings: Settings, connect: Connected) -> Self {
+    pub(crate) fn new(
+        conn: quinn::Connection,
+        settings: Settings,
+        connect: Connected,
+        runtime: Arc<dyn quinn::Runtime>,
+    ) -> Self {
         // The session ID is the stream ID of the CONNECT request.
         let session_id = connect.session_id();
 
@@ -148,6 +156,7 @@ impl Session {
 
         let this = Self {
             conn,
+            runtime,
             accept: Some(Arc::new(Mutex::new(accept))),
             session_id: Some(session_id),
             header_uni: header_uni.into(),
@@ -172,7 +181,8 @@ impl Session {
 
         // Run a background task to read capsules from the CONNECT recv stream.
         let conn2 = this.conn.clone();
-        tokio::spawn(Self::run_recv(conn2, connect.recv, error));
+        this.runtime
+            .spawn(Box::pin(Self::run_recv(conn2, connect.recv, error)));
 
         this
     }
@@ -241,6 +251,16 @@ impl Session {
         conn: quinn::Connection,
         request: impl Into<ConnectRequest>,
     ) -> Result<Session, ClientError> {
+        Self::connect_with(conn, request, Arc::new(quinn::TokioRuntime)).await
+    }
+
+    /// Connect like [`Session::connect`], using the supplied runtime to spawn the
+    /// background tasks and timers instead of the ambient tokio runtime.
+    pub async fn connect_with(
+        conn: quinn::Connection,
+        request: impl Into<ConnectRequest>,
+        runtime: Arc<dyn quinn::Runtime>,
+    ) -> Result<Session, ClientError> {
         let request = request.into();
 
         // Perform the H3 handshake by sending/reciving SETTINGS frames.
@@ -251,7 +271,7 @@ impl Session {
 
         // Return the resulting session with a reference to the control/connect streams.
         // If either stream is closed, then the session will be closed, so we need to keep them around.
-        let session = Session::new(conn, settings, connect);
+        let session = Session::new(conn, settings, connect, runtime);
 
         Ok(session)
     }
@@ -416,9 +436,9 @@ impl Session {
                     web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
                 let timeout = (self.rtt() * 3).max(Duration::from_millis(100));
 
-                tokio::spawn(async move {
+                self.runtime.spawn(Box::pin(async move {
                     Self::close_with_capsule(conn, send, capsule, code, timeout).await;
-                });
+                }));
             }
         } else {
             // Raw QUIC mode: no capsule needed.
@@ -550,8 +570,15 @@ impl Session {
     /// handshake, read from `conn` on demand — a connection that is still handshaking
     /// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
     pub fn raw(conn: quinn::Connection) -> Self {
+        Self::raw_with(conn, Arc::new(quinn::TokioRuntime))
+    }
+
+    /// Create a raw session like [`Session::raw`], using the supplied runtime instead of
+    /// the ambient tokio runtime.
+    pub fn raw_with(conn: quinn::Connection, runtime: Arc<dyn quinn::Runtime>) -> Self {
         Self {
             conn,
+            runtime,
             session_id: None,
             header_uni: Default::default(),
             header_bi: Default::default(),
