@@ -1,6 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, task::Poll};
 
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
+use futures::{
+    future::{BoxFuture, Either},
+    stream::FuturesUnordered,
+    StreamExt,
+};
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -131,18 +135,37 @@ impl Server {
     /// Accept a new WebTransport session Request from a client.
     pub async fn accept(&mut self) -> Option<Request> {
         loop {
-            tokio::select! {
-                res = self.endpoint.accept() => {
-                    let conn = res?;
+            // Borrow both halves inside the block so the winner can be handled afterwards.
+            let winner = {
+                let incoming = self.endpoint.accept();
+                let pending = &mut self.accept;
+
+                // An empty set of pending handshakes must not end the accept loop.
+                let handshake = futures::future::poll_fn(|cx| match pending.poll_next_unpin(cx) {
+                    Poll::Ready(Some(res)) => Poll::Ready(res),
+                    _ => Poll::Pending,
+                });
+
+                futures::pin_mut!(incoming, handshake);
+
+                match futures::future::select(incoming, handshake).await {
+                    Either::Left((incoming, _)) => Either::Left(incoming),
+                    Either::Right((res, _)) => Either::Right(res),
+                }
+            };
+
+            match winner {
+                Either::Left(incoming) => {
+                    let conn = incoming?;
                     let runtime = self.runtime.clone();
                     self.accept.push(Box::pin(async move {
                         let conn = conn.await?;
                         Request::accept_with(conn, runtime).await
                     }));
                 }
-                Some(res) = self.accept.next() => {
+                Either::Right(res) => {
                     if let Ok(session) = res {
-                        return Some(session)
+                        return Some(session);
                     }
                 }
             }
