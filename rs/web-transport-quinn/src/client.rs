@@ -5,6 +5,7 @@ use crate::proto::ConnectRequest;
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::{client::danger::ServerCertVerifier, pki_types::CertificateDer};
+#[cfg(feature = "tokio")]
 use tokio::net::lookup_host;
 use url::Host;
 
@@ -227,6 +228,7 @@ impl Client {
     /// Manually create a client via a Quinn endpoint and config.
     ///
     /// The ALPN MUST be set to [ALPN].
+    #[cfg(feature = "tokio")]
     pub fn new(endpoint: quinn::Endpoint, config: quinn::ClientConfig) -> Self {
         Self::new_with(endpoint, config, Arc::new(quinn::TokioRuntime))
     }
@@ -262,17 +264,7 @@ impl Client {
         {
             Host::Domain(domain) => {
                 let domain = domain.to_string();
-                // Look up the DNS entry.
-                let mut remotes = match lookup_host((domain.clone(), port)).await {
-                    Ok(remotes) => remotes,
-                    Err(_) => return Err(ClientError::InvalidDnsName(domain)),
-                };
-
-                // Return the first entry.
-                let remote = match remotes.next() {
-                    Some(remote) => remote,
-                    None => return Err(ClientError::InvalidDnsName(domain)),
-                };
+                let remote = Self::lookup(domain.clone(), port).await?;
 
                 (domain, remote)
             }
@@ -288,6 +280,28 @@ impl Client {
 
         // Connect with the connection we established.
         Session::connect_with(conn, request, self.runtime.clone()).await
+    }
+
+    /// Resolve a domain name to the address of the server.
+    #[cfg(feature = "tokio")]
+    async fn lookup(domain: String, port: u16) -> Result<SocketAddr, ClientError> {
+        // Look up the DNS entry.
+        let mut remotes = match lookup_host((domain.clone(), port)).await {
+            Ok(remotes) => remotes,
+            Err(_) => return Err(ClientError::InvalidDnsName(domain)),
+        };
+
+        // Return the first entry.
+        match remotes.next() {
+            Some(remote) => Ok(remote),
+            None => Err(ClientError::InvalidDnsName(domain)),
+        }
+    }
+
+    /// DNS resolution needs an executor, so only IP literals work without the `tokio` feature.
+    #[cfg(not(feature = "tokio"))]
+    async fn lookup(domain: String, _port: u16) -> Result<SocketAddr, ClientError> {
+        Err(ClientError::InvalidDnsName(domain))
     }
 }
 

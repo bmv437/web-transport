@@ -247,6 +247,7 @@ impl Session {
 
     /// Connect using an established QUIC connection if you want to create the connection yourself.
     /// This will only work with a brand new QUIC connection using the HTTP/3 ALPN.
+    #[cfg(feature = "tokio")]
     pub async fn connect(
         conn: quinn::Connection,
         request: impl Into<ConnectRequest>,
@@ -577,6 +578,7 @@ impl Session {
     /// return `None`. [`Self::protocol`] reports the ALPN negotiated by the QUIC
     /// handshake, read from `conn` on demand — a connection that is still handshaking
     /// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
+    #[cfg(feature = "tokio")]
     pub fn raw(conn: quinn::Connection) -> Self {
         Self::raw_with(conn, Arc::new(quinn::TokioRuntime))
     }
