@@ -1,4 +1,3 @@
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use std::sync::Arc;
 
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
@@ -66,7 +65,10 @@ impl ServerBuilder {
         let server = quinn::Endpoint::server(config, self.addr)
             .map_err(|e| ServerError::IoError(e.into()))?;
 
-        Ok(Server::new(server))
+        // Endpoint::server above already requires a default runtime.
+        let runtime = quinn::default_runtime().expect("no async runtime found");
+
+        Ok(Server::new_with(server, runtime))
     }
 
     /// Build the quinn config, taking the transport separately so the caller (and the
@@ -97,6 +99,7 @@ impl ServerBuilder {
 pub struct Server {
     endpoint: quinn::Endpoint,
     accept: FuturesUnordered<BoxFuture<'static, Result<Request, ServerError>>>,
+    runtime: Arc<dyn quinn::Runtime>,
 }
 
 impl core::ops::Deref for Server {
@@ -112,9 +115,16 @@ impl Server {
     ///
     /// NOTE: The ALPN must be set to `crate::ALPN` for WebTransport to work.
     pub fn new(endpoint: quinn::Endpoint) -> Self {
+        Self::new_with(endpoint, Arc::new(quinn::TokioRuntime))
+    }
+
+    /// Create a server like [`Server::new`], using the supplied runtime instead of the
+    /// ambient tokio runtime for the sessions it accepts.
+    pub fn new_with(endpoint: quinn::Endpoint, runtime: Arc<dyn quinn::Runtime>) -> Self {
         Self {
             endpoint,
             accept: Default::default(),
+            runtime,
         }
     }
 
@@ -124,9 +134,10 @@ impl Server {
             tokio::select! {
                 res = self.endpoint.accept() => {
                     let conn = res?;
+                    let runtime = self.runtime.clone();
                     self.accept.push(Box::pin(async move {
                         let conn = conn.await?;
-                        Request::accept(conn).await
+                        Request::accept_with(conn, runtime).await
                     }));
                 }
                 Some(res) = self.accept.next() => {
@@ -144,11 +155,21 @@ pub struct Request {
     conn: quinn::Connection,
     settings: Settings,
     connect: Connecting,
+    runtime: Arc<dyn quinn::Runtime>,
 }
 
 impl Request {
     /// Accept a new WebTransport session from a client.
     pub async fn accept(conn: quinn::Connection) -> Result<Self, ServerError> {
+        Self::accept_with(conn, Arc::new(quinn::TokioRuntime)).await
+    }
+
+    /// Accept a session like [`Request::accept`], using the supplied runtime instead of
+    /// the ambient tokio runtime.
+    pub async fn accept_with(
+        conn: quinn::Connection,
+        runtime: Arc<dyn quinn::Runtime>,
+    ) -> Result<Self, ServerError> {
         // Perform the H3 handshake by sending/reciving SETTINGS frames.
         let settings = Settings::connect(&conn).await?;
 
@@ -160,6 +181,7 @@ impl Request {
             conn,
             settings,
             connect,
+            runtime,
         })
     }
 
@@ -176,7 +198,12 @@ impl Request {
     ) -> Result<Session, ServerError> {
         let response = response.into();
         let connect = self.connect.respond(response).await?;
-        Ok(Session::new(self.conn, self.settings, connect))
+        Ok(Session::new(
+            self.conn,
+            self.settings,
+            connect,
+            self.runtime,
+        ))
     }
 
     /// Reject the session with the given status code.

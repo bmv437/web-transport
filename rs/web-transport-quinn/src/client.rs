@@ -163,9 +163,14 @@ impl ClientBuilder {
         client_config.transport_config(transport_config(self.congestion_controller.as_ref()));
 
         let client = quinn::Endpoint::client("[::]:0".parse().unwrap()).unwrap();
+
+        // Endpoint::client above already requires a default runtime.
+        let runtime = quinn::default_runtime().expect("no async runtime found");
+
         Ok(Client {
             endpoint: client,
             config: client_config,
+            runtime,
         })
     }
 }
@@ -215,6 +220,7 @@ impl DangerousClientBuilder {
 pub struct Client {
     endpoint: quinn::Endpoint,
     config: quinn::ClientConfig,
+    runtime: Arc<dyn quinn::Runtime>,
 }
 
 impl Client {
@@ -222,7 +228,21 @@ impl Client {
     ///
     /// The ALPN MUST be set to [ALPN].
     pub fn new(endpoint: quinn::Endpoint, config: quinn::ClientConfig) -> Self {
-        Self { endpoint, config }
+        Self::new_with(endpoint, config, Arc::new(quinn::TokioRuntime))
+    }
+
+    /// Create a client like [`Client::new`], using the supplied runtime instead of the
+    /// ambient tokio runtime for the sessions it establishes.
+    pub fn new_with(
+        endpoint: quinn::Endpoint,
+        config: quinn::ClientConfig,
+        runtime: Arc<dyn quinn::Runtime>,
+    ) -> Self {
+        Self {
+            endpoint,
+            config,
+            runtime,
+        }
     }
 
     /// Connect to the server.
@@ -267,7 +287,7 @@ impl Client {
         let conn = conn.await?;
 
         // Connect with the connection we established.
-        Session::connect(conn, request).await
+        Session::connect_with(conn, request, self.runtime.clone()).await
     }
 }
 
