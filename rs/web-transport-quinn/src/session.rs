@@ -502,7 +502,8 @@ impl Session {
             conn.closed().await;
         };
 
-        let mut timer = runtime.new_timer(std::time::Instant::now() + timeout);
+        // Timer deadlines are on the runtime's clock, which need not match Instant::now.
+        let mut timer = runtime.new_timer(runtime.now() + timeout);
         let expired = poll_fn(|cx| timer.as_mut().poll(cx));
 
         futures::pin_mut!(graceful, expired);
