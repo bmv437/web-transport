@@ -17,7 +17,3 @@ Keep signatures and wire formats unchanged. Update backend and router lifecycle 
 ## Closes
 
 - [#428](https://github.com/moq-dev/web-transport/issues/428) - restore final-handle cleanup
-
-## Related
-
-- [Quiche final Session drop](/quest/a0/quiche-session-drop.md) - independently repair capsule-task ownership
