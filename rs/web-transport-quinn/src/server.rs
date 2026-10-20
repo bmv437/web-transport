@@ -149,9 +149,11 @@ impl Server {
 
                 futures::pin_mut!(incoming, handshake);
 
-                match futures::future::select(incoming, handshake).await {
-                    Either::Left((incoming, _)) => Either::Left(incoming),
-                    Either::Right((res, _)) => Either::Right(res),
+                // Handshakes go first: there are only as many as the arrivals already taken,
+                // whereas a steady stream of arrivals would never let them be polled.
+                match futures::future::select(handshake, incoming).await {
+                    Either::Left((res, _)) => Either::Right(res),
+                    Either::Right((incoming, _)) => Either::Left(incoming),
                 }
             };
 
