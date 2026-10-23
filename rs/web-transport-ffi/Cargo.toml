@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 tokio-util = "0.7"
 uniffi = { version = "0.32", features = ["cli"] }
 url = "2"
-web-transport-quinn = { workspace = true, features = ["tokio"] }
+web-transport-quinn = { workspace = true }
 
 [build-dependencies]
 uniffi = { version = "0.32", features = ["build"] }

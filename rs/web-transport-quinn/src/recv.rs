@@ -1,11 +1,11 @@
 use crate::error::CloseReason;
 use std::{
     future::Future,
+    io,
+    pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
 };
-#[cfg(feature = "tokio")]
-use std::{io, pin::Pin};
 
 use bytes::Bytes;
 
@@ -135,7 +135,6 @@ impl RecvStream {
     // We purposely don't expose the 0RTT because it's not valid with WebTransport
 }
 
-#[cfg(feature = "tokio")]
 impl tokio::io::AsyncRead for RecvStream {
     fn poll_read(
         mut self: Pin<&mut Self>,

@@ -15,17 +15,12 @@ categories = ["network-programming", "web-programming"]
 all-features = true
 
 [features]
-default = ["aws-lc-rs", "tokio"]
+default = ["aws-lc-rs"]
 aws-lc-rs = ["quinn/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
 ring = ["quinn/rustls-ring", "rustls/ring"]
 # Unlocks `quinn::TransportConfig::qlog_stream` and `quinn::QlogConfig`, which this
 # crate re-exports but cannot enable on a caller's behalf.
 qlog = ["quinn/qlog"]
-# Use tokio as the executor: quinn's tokio runtime, the constructors that default to
-# it, the tokio io traits on the streams, and DNS resolution in `Client::connect`.
-# Turn it off and pass your own `quinn::Runtime` to the `_with` constructors to keep a
-# tokio executor out of the build.
-tokio = ["dep:tokio", "quinn/runtime-tokio"]
 
 [dependencies]
 bytes = "1"
@@ -35,6 +30,7 @@ kio = "0.6.2"
 
 quinn = { version = "0.11", default-features = false, features = [
     "platform-verifier",
+    "runtime-tokio",
     "bloom",
 ] }
 
@@ -46,8 +42,9 @@ rustls-native-certs = "0.8"
 thiserror = "2"
 
 tokio = { version = "1", default-features = false, features = [
+    "io-util",
     "net",
-], optional = true }
+] }
 tracing = "0.1"
 url = "2"
 web-transport-proto = { workspace = true }
@@ -61,11 +58,3 @@ rustls-pemfile = "2"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-
-[[example]]
-name = "echo-client-advanced"
-required-features = ["tokio"]
-
-[[example]]
-name = "echo-server-advanced"
-required-features = ["tokio"]

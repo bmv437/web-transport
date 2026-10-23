@@ -5,8 +5,8 @@
 //! a response. The session reports the negotiated ALPN as its protocol instead.
 
 // A crypto provider is needed to establish the connection, matching the gate on
-// the crate's own builders, and `Session::raw` defaults to the tokio runtime.
-#![cfg(all(feature = "tokio", any(feature = "aws-lc-rs", feature = "ring")))]
+// the crate's own builders.
+#![cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 
 use std::{
     net::{Ipv4Addr, SocketAddr},

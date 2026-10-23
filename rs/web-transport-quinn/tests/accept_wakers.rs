@@ -12,9 +12,6 @@
 //! back into this crate. When that caller walked away, the accepters still parked here
 //! were never woken.
 
-// The builders need quinn's tokio runtime to create their endpoints.
-#![cfg(feature = "tokio")]
-
 use std::{
     future::Future,
     net::Ipv4Addr,

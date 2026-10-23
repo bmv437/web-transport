@@ -61,9 +61,6 @@ fn negotiated_alpn(_conn: &quinn::Connection) -> Option<String> {
 pub struct Session {
     conn: quinn::Connection,
 
-    // The runtime used to spawn the background tasks that drive the session.
-    runtime: Arc<dyn quinn::Runtime>,
-
     // The session ID, as determined by the stream ID of the connect request.
     session_id: Option<VarInt>,
 
@@ -129,12 +126,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(
-        conn: quinn::Connection,
-        settings: Settings,
-        connect: Connected,
-        runtime: Arc<dyn quinn::Runtime>,
-    ) -> Self {
+    pub(crate) fn new(conn: quinn::Connection, settings: Settings, connect: Connected) -> Self {
         // The session ID is the stream ID of the CONNECT request.
         let session_id = connect.session_id();
 
@@ -157,7 +149,6 @@ impl Session {
 
         let this = Self {
             conn,
-            runtime,
             accept: Some(Arc::new(Mutex::new(accept))),
             session_id: Some(session_id),
             header_uni: header_uni.into(),
@@ -180,10 +171,11 @@ impl Session {
             parked_accept_bi: Default::default(),
         };
 
-        // Run a background task to read capsules from the CONNECT recv stream.
+        // Run a background task to read capsules from the CONNECT recv stream, on whichever
+        // runtime quinn detects, as quinn's own Endpoint::client and Endpoint::server do.
+        let runtime = quinn::default_runtime().expect("no async runtime found");
         let conn2 = this.conn.clone();
-        this.runtime
-            .spawn(Box::pin(Self::run_recv(conn2, connect.recv, error)));
+        runtime.spawn(Box::pin(Self::run_recv(conn2, connect.recv, error)));
 
         this
     }
@@ -244,20 +236,9 @@ impl Session {
 
     /// Connect using an established QUIC connection if you want to create the connection yourself.
     /// This will only work with a brand new QUIC connection using the HTTP/3 ALPN.
-    #[cfg(feature = "tokio")]
     pub async fn connect(
         conn: quinn::Connection,
         request: impl Into<ConnectRequest>,
-    ) -> Result<Session, ClientError> {
-        Self::connect_with(conn, request, Arc::new(quinn::TokioRuntime)).await
-    }
-
-    /// Connect like [`Session::connect`], using the supplied runtime to spawn the
-    /// background tasks and timers instead of the ambient tokio runtime.
-    pub async fn connect_with(
-        conn: quinn::Connection,
-        request: impl Into<ConnectRequest>,
-        runtime: Arc<dyn quinn::Runtime>,
     ) -> Result<Session, ClientError> {
         let request = request.into();
 
@@ -269,7 +250,7 @@ impl Session {
 
         // Return the resulting session with a reference to the control/connect streams.
         // If either stream is closed, then the session will be closed, so we need to keep them around.
-        let session = Session::new(conn, settings, connect, runtime);
+        let session = Session::new(conn, settings, connect);
 
         Ok(session)
     }
@@ -412,9 +393,14 @@ impl Session {
     /// capsule is written on the CONNECT stream before the QUIC connection is closed.
     /// This allows browser clients to receive the close code and reason via `WebTransport.closed`.
     ///
-    /// The capsule write and connection close happen asynchronously in a spawned task.
-    /// Callers should `await` [`Session::closed()`] to ensure the capsule has been
-    /// delivered. Session operations will fail once the QUIC connection is closed.
+    /// The capsule write and connection close happen asynchronously in a task spawned on
+    /// the runtime [`quinn::default_runtime`] detects. Callers should `await`
+    /// [`Session::closed()`] to ensure the capsule has been delivered. Session operations
+    /// will fail once the QUIC connection is closed.
+    ///
+    /// When called where no runtime can be detected, such as outside a tokio runtime with
+    /// only quinn's tokio support enabled, the capsule is skipped and the QUIC connection is
+    /// closed immediately with the same code and reason.
     pub fn close(&self, code: u32, reason: &[u8]) {
         // Record the local close error. First writer wins — if the background
         // task already set a remote close error, or close() was already called,
@@ -432,14 +418,23 @@ impl Session {
             let send = self.connect_send.lock().unwrap().take();
 
             if let Some(send) = send {
+                // Without a runtime to run the graceful close on, such as when called from
+                // outside one, close the connection now and carry the reason there instead.
+                let Some(runtime) = quinn::default_runtime() else {
+                    let http3_code: quinn::VarInt = web_transport_proto::error_to_http3(code)
+                        .try_into()
+                        .unwrap();
+                    self.conn.close(http3_code, reason);
+                    return;
+                };
+
                 let reason = String::from_utf8_lossy(reason).into_owned();
                 let conn = self.conn.clone();
                 let capsule =
                     web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
                 let timeout = (self.rtt() * 3).max(Duration::from_millis(100));
-                let runtime = self.runtime.clone();
 
-                self.runtime.spawn(Box::pin(async move {
+                runtime.clone().spawn(Box::pin(async move {
                     Self::close_with_capsule(conn, send, capsule, code, timeout, runtime).await;
                 }));
             }
@@ -572,18 +567,10 @@ impl Session {
     /// return `None`. [`Self::protocol`] reports the ALPN negotiated by the QUIC
     /// handshake, read from `conn` on demand — a connection that is still handshaking
     /// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
-    #[cfg(feature = "tokio")]
     pub fn raw(conn: quinn::Connection) -> Self {
-        Self::raw_with(conn, Arc::new(quinn::TokioRuntime))
-    }
-
-    /// Create a raw session like [`Session::raw`], using the supplied runtime instead of
-    /// the ambient tokio runtime.
-    pub fn raw_with(conn: quinn::Connection, runtime: Arc<dyn quinn::Runtime>) -> Self {
         Self {
             error: Arc::new(CloseReason::raw(conn.clone())),
             conn,
-            runtime,
             session_id: None,
             header_uni: Default::default(),
             header_bi: Default::default(),
@@ -1339,8 +1326,7 @@ impl web_transport_trait::poll::Session for Session {
     }
 }
 
-// These tests call `Session::raw`, and their endpoints need quinn's tokio runtime.
-#[cfg(all(test, feature = "tokio", any(feature = "aws-lc-rs", feature = "ring")))]
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests {
     use std::{net::Ipv4Addr, sync::Arc};
 
@@ -1467,5 +1453,85 @@ mod tests {
         let (_client, server, _endpoints) = pair_with(transport).await;
 
         assert_eq!(Session::raw(server).max_datagram_size(), 0);
+    }
+
+    /// How far [`OffsetRuntime`]'s clock runs ahead of the real one, well past any close timeout.
+    const OFFSET: Duration = Duration::from_secs(60 * 60);
+
+    /// Quinn's tokio runtime with a clock that runs [`OFFSET`] ahead of `Instant::now`, as
+    /// tokio's paused time or a simulator can. It records every deadline it is asked to time.
+    #[derive(Debug, Default)]
+    struct OffsetRuntime {
+        deadlines: Mutex<Vec<std::time::Instant>>,
+    }
+
+    impl quinn::Runtime for OffsetRuntime {
+        fn new_timer(&self, deadline: std::time::Instant) -> Pin<Box<dyn quinn::AsyncTimer>> {
+            self.deadlines.lock().unwrap().push(deadline);
+
+            // Move the deadline onto the real clock; one already in this clock's past fires at once.
+            let remaining = deadline.saturating_duration_since(self.now());
+            quinn::TokioRuntime.new_timer(std::time::Instant::now() + remaining)
+        }
+
+        fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
+            quinn::TokioRuntime.spawn(future)
+        }
+
+        fn wrap_udp_socket(
+            &self,
+            socket: std::net::UdpSocket,
+        ) -> std::io::Result<Arc<dyn quinn::AsyncUdpSocket>> {
+            quinn::TokioRuntime.wrap_udp_socket(socket)
+        }
+
+        fn now(&self) -> std::time::Instant {
+            std::time::Instant::now() + OFFSET
+        }
+    }
+
+    /// The graceful close bounds its wait for the peer with a timer on the runtime it runs
+    /// on, so the deadline has to be ahead of that runtime's clock rather than `Instant::now`.
+    #[tokio::test]
+    async fn close_deadline_follows_the_runtime_clock() {
+        use quinn::Runtime;
+
+        let (client, _server, _endpoints) = pair().await;
+        let (send, _recv) = client.open_bi().await.unwrap();
+
+        let runtime = Arc::new(OffsetRuntime::default());
+        let before = runtime.now();
+
+        // The peer never closes, so only the timer can end the graceful close.
+        let capsule = web_transport_proto::Capsule::CloseWebTransportSession {
+            code: 0,
+            reason: "bye".into(),
+        };
+        Session::close_with_capsule(
+            client.clone(),
+            send,
+            capsule,
+            0,
+            Duration::from_millis(100),
+            runtime.clone(),
+        )
+        .await;
+
+        let deadlines = runtime.deadlines.lock().unwrap().clone();
+        assert_eq!(deadlines.len(), 1, "close did not time out on the runtime");
+        assert!(
+            deadlines[0] > before,
+            "the close deadline is {:?} behind the runtime's clock",
+            before - deadlines[0]
+        );
+        assert!(client.close_reason().is_some(), "the timeout did not close");
+    }
+
+    /// Sessions and requests do not store the runtime, so they stay unwind safe.
+    #[test]
+    fn unwind_safe() {
+        fn assert<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert::<Session>();
+        assert::<crate::Request>();
     }
 }

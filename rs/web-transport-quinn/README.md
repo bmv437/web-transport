@@ -51,11 +51,11 @@ See the [examples](examples) or [moq-native](https://github.com/moq-dev/moq-rs/b
     send.write(b"hello").await?;
 ```
 
-## Features
-The `tokio` feature is on by default and makes tokio the executor: it enables quinn's tokio runtime, the `tokio::io` traits on the streams, DNS resolution in `Client::connect`, and the constructors that spawn on the ambient tokio runtime.
-
-To run on another executor, build with `--no-default-features --features ring` (or `aws-lc-rs`) and pass your own [quinn::Runtime](https://docs.rs/quinn/latest/quinn/trait.Runtime.html) to `Client::new_with`, `Server::new_with`, `Request::accept_with`, `Session::connect_with`, or `Session::raw_with`.
-Nothing then enables a tokio runtime, timer, or macro feature, and `Client::connect` can no longer resolve domain names, so give it a URL with an IP literal.
+## Async runtimes
+Each WebTransport session runs a background task that reads capsules from the CONNECT stream, and `Session::close` runs the graceful close in another.
+Both are spawned on the runtime that [quinn::default_runtime](https://docs.rs/quinn/latest/quinn/fn.default_runtime.html) detects, the same way `quinn::Endpoint::client` and `quinn::Endpoint::server` pick theirs.
+Tokio works out of the box. To run on async-std or smol instead, enable quinn's `runtime-async-std` or `runtime-smol` feature in your own `Cargo.toml`.
+Resolving a hostname in `Client::connect` still uses tokio, so outside a tokio runtime connect to an IP address or resolve the name yourself.
 
 ## API
 The `web-transport-quinn` API is almost identical to the Quinn API, except that [Connection](https://docs.rs/quinn/latest/quinn/struct.Connection.html) is called [Session](https://docs.rs/web-transport-quinn/latest/web_transport_quinn/struct.Session.html).
